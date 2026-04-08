@@ -359,6 +359,18 @@ mod tests {
         std::env::temp_dir().join(format!("plugins-hook-runner-{label}-{nanos}"))
     }
 
+    fn make_executable(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = fs::Permissions::from_mode(0o755);
+            fs::set_permissions(path, perms)
+                .unwrap_or_else(|e| panic!("chmod +x {}: {e}", path.display()));
+        }
+        #[cfg(not(unix))]
+        let _ = path;
+    }
+
     fn write_hook_plugin(
         root: &Path,
         name: &str,
@@ -368,21 +380,30 @@ mod tests {
     ) {
         fs::create_dir_all(root.join(".claude-plugin")).expect("manifest dir");
         fs::create_dir_all(root.join("hooks")).expect("hooks dir");
+
+        let pre_path = root.join("hooks").join("pre.sh");
         fs::write(
-            root.join("hooks").join("pre.sh"),
+            &pre_path,
             format!("#!/bin/sh\nprintf '%s\\n' '{pre_message}'\n"),
         )
         .expect("write pre hook");
+        make_executable(&pre_path);
+
+        let post_path = root.join("hooks").join("post.sh");
         fs::write(
-            root.join("hooks").join("post.sh"),
+            &post_path,
             format!("#!/bin/sh\nprintf '%s\\n' '{post_message}'\n"),
         )
         .expect("write post hook");
+        make_executable(&post_path);
+
+        let failure_path = root.join("hooks").join("failure.sh");
         fs::write(
-            root.join("hooks").join("failure.sh"),
+            &failure_path,
             format!("#!/bin/sh\nprintf '%s\\n' '{failure_message}'\n"),
         )
         .expect("write failure hook");
+        make_executable(&failure_path);
         fs::write(
             root.join(".claude-plugin").join("plugin.json"),
             format!(
@@ -495,5 +516,28 @@ mod tests {
             .messages()
             .iter()
             .any(|message| message == "later plugin hook"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn generated_hook_scripts_are_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // given
+        let root = temp_dir("exec-guard");
+        write_hook_plugin(&root, "exec-check", "pre", "post", "fail");
+
+        // then
+        for script in ["pre.sh", "post.sh", "failure.sh"] {
+            let path = root.join("hooks").join(script);
+            let mode = fs::metadata(&path)
+                .unwrap_or_else(|e| panic!("{script} metadata: {e}"))
+                .permissions()
+                .mode();
+            assert!(
+                mode & 0o111 != 0,
+                "{script} must have at least one execute bit set, got mode {mode:#o}"
+            );
+        }
     }
 }
