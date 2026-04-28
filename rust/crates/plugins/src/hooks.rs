@@ -337,7 +337,28 @@ impl CommandWithStdin {
         let mut child = self.command.spawn()?;
         if let Some(mut child_stdin) = child.stdin.take() {
             use std::io::Write as _;
-            child_stdin.write_all(stdin)?;
+            // Tolerate BrokenPipe: a hook script that runs to completion
+            // (or exits early without reading stdin) closes its stdin
+            // before the parent finishes writing the JSON payload, and
+            // the kernel raises EPIPE on the parent's write_all. That is
+            // not a hook failure — the child still exited cleanly and we
+            // still need to wait_with_output() to capture stdout/stderr
+            // and the real exit code. Other write errors (e.g. EIO,
+            // permission, OOM) still propagate.
+            //
+            // This was the root cause of the Linux CI flake on
+            // hooks::tests::collects_and_runs_hooks_from_enabled_plugins
+            // (ROADMAP #25, runs 24120271422 / 24120538408 / 24121392171
+            // / 24121776826): the test hook scripts run in microseconds
+            // and the parent's stdin write races against child exit.
+            // macOS pipes happen to buffer the small payload before the
+            // child exits; Linux pipes do not, so the race shows up
+            // deterministically on ubuntu runners.
+            match child_stdin.write_all(stdin) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+                Err(error) => return Err(error),
+            }
         }
         child.wait_with_output()
     }
